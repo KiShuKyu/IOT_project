@@ -1,1 +1,104 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pala Note</title><link rel="stylesheet" href="/static/style.css"></head><body><main class="wrap"><header><div class="logo">PN</div><div><h1>Pala Note</h1><p>Voice memories, organized.</p></div><button class="secondary" id="refresh">Refresh</button></header><section class="panel"><h2>Test audio without ESP32</h2><p>Upload an audio file to test Gemini transcription and extraction while hardware is unavailable.</p><form id="form"><input type="file" id="audio" accept="audio/*" required><button id="submit">Process audio</button></form><div id="status"></div><h3>Transcript</h3><div id="transcript" class="result"></div><h3>Extracted items</h3><div id="extracted"></div></section><section class="panel"><h2>Saved items <span id="count"></span></h2><div id="items"></div></section><footer id="health">Checking server…</footer></main><script src="/static/app.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Pala Note</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main class="wrap">
+    <header>
+        <div class="logo">PN</div>
+        <div>
+            <h1>Pala Note</h1>
+            <p>Voice memories, organized.</p>
+        </div>
+        <button class="secondary" id="refresh">Refresh</button>
+    </header>
+
+    <section class="panel">
+        <h2>Generate a Demo Project</h2>
+        <p>Describe your project idea using your voice.</p>
+
+        <div>
+            <button type="button" id="recordProject">
+                Start Recording
+            </button>
+
+            <button type="button" id="stopProject" disabled>
+                Stop Recording
+            </button>
+        </div>
+
+        <audio id="projectPreview" controls hidden></audio>
+
+        <button type="button" id="prepareProject" disabled>
+            Prepare Project Brief
+        </button>
+
+        <div id="projectStatus"></div>
+
+        <div id="projectProposal" hidden>
+            <h3>Review Your Project</h3>
+
+            <label>Project Name</label>
+            <input id="projectName" type="text">
+
+            <label>Project Brief</label>
+            <textarea id="projectBrief" rows="5"></textarea>
+
+            <button type="button" id="confirmProject">
+                Confirm &amp; Generate
+            </button>
+        </div>
+
+        <div id="generationStatus"></div>
+    </section>
+
+    <section class="panel">
+        <h2>Recall an Existing Project</h2>
+        <p>Ask Pala Note about a project you've built before.</p>
+
+        <div>
+            <input
+                type="text"
+                id="recallProjectQuery"
+                placeholder="e.g. Expense Tracker"
+            >
+
+            <button type="button" id="recallProjectBtn">
+                Recall Project
+            </button>
+        </div>
+
+        <div id="recallProjectStatus"></div>
+        <div id="recallProjectSummary" class="result"></div>
+
+        <audio id="recallProjectAudio" controls hidden></audio>
+    </section>
+
+    <section class="panel">
+        <h2>Test audio without ESP32</h2>
+        <p>Upload an audio file to test Gemini transcription and extraction while hardware is unavailable.</p>
+        <form id="form">
+            <input type="file" id="audio" accept="audio/*" required>
+            <button id="submit">Process audio</button>
+        </form>
+        <div id="status"></div>
+        <h3>Transcript</h3>
+        <div id="transcript" class="result"></div>
+        <h3>Extracted items</h3>
+        <div id="extracted"></div>
+    </section>
+
+    <section class="panel">
+        <h2>Saved items <span id="count"></span></h2>
+        <div id="items"></div>
+    </section>
+
+    <footer id="health">Checking server…</footer>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -13,3 +13,10 @@ class Config:
     PORT = int(os.getenv('PORT', '5000'))
     DEBUG = os.getenv('DEBUG', '0').lower() in ('1','true','yes')
     MAX_UPLOAD_MB = int(os.getenv('MAX_UPLOAD_MB', '20'))
+    OPENHANDS_URL = os.getenv('OPENHANDS_URL', 'http://127.0.0.1:8000')
+    OPENHANDS_API_KEY = os.getenv('OPENHANDS_API_KEY', '')
+    OPENHANDS_AGENT_PROFILE_ID = os.getenv(
+        'OPENHANDS_AGENT_PROFILE_ID',
+        '1b7d86a9-63cf-402e-b370-cc5cb4420b31'
+    )
+    PROJECTS_ROOT = os.getenv('PROJECTS_ROOT', r'D:\Coding\PalaProjects')
