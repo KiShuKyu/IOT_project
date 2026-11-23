@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pala Note</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1020; --panel:#141c2f; --line:#26334d; --muted:#9caac2; --text:#edf2ff; --accent:#7c9cff; --green:#3dd6a0; --red:#ff7373; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:28px 16px 48px; background:radial-gradient(circle at 20% 0%,#1b2b4b 0,#0b1020 45%); color:var(--text); font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }
+    main { max-width:900px; margin:auto; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:22px; }
+    h1 { margin:0; letter-spacing:-.04em; font-size:clamp(30px,5vw,42px); }
+    .sub { color:var(--muted); margin-top:4px; }
+    .panel { background:rgba(20,28,47,.94); border:1px solid var(--line); border-radius:18px; padding:20px; margin:16px 0; box-shadow:0 12px 38px #0003; }
+    .row { display:flex; align-items:center; flex-wrap:wrap; gap:12px; }
+    .status { color:var(--muted); font-size:14px; margin:12px 0 16px; }
+    .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:#65728a; margin-right:8px; }
+    .dot.good { background:var(--green); box-shadow:0 0 12px #3dd6a088; }
+    .dot.bad { background:var(--red); }
+    button { border:0; border-radius:11px; padding:12px 18px; font-weight:700; font-size:15px; cursor:pointer; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .start { background:var(--green); color:#061a15; }
+    .stop { background:var(--red); color:#220909; }
+    .secondary { background:#273650; color:var(--text); }
+    .hint { color:var(--muted); font-size:13px; margin-top:12px; }
+    .notice { border-left:3px solid var(--accent); padding:10px 12px; color:#bdc9df; background:#1a2740; border-radius:5px 10px 10px 5px; font-size:13px; margin-top:16px; }
+    h2 { margin:0 0 14px; font-size:20px; }
+    .notes { display:grid; gap:12px; }
+    .note { border:1px solid var(--line); background:#10182a; border-radius:13px; padding:15px; }
+    .note-top { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+    .type { text-transform:uppercase; font-size:11px; letter-spacing:.08em; color:#b9c9eb; background:#263650; padding:4px 8px; border-radius:99px; }
+    .date { color:var(--muted); font-size:12px; }
+    .note h3 { margin:9px 0 4px; font-size:17px; }
+    .note p { margin:5px 0; color:#cbd5e7; }
+    .transcript { color:var(--muted)!important; font-size:13px; border-top:1px solid var(--line); padding-top:8px; margin-top:10px!important; }
+    input, textarea { width:100%; background:#0d1525; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:12px; font:inherit; }
+    textarea { min-height:82px; resize:vertical; }
+    .answer { margin-top:14px; padding:14px; border:1px solid var(--line); border-radius:12px; background:#10182a; white-space:pre-wrap; display:none; }
+    .error { color:var(--red); }
+    @media(max-width:520px){ body{padding:18px 12px 36px}.panel{padding:16px}button{flex:1} }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Pala Note</h1>
+      <div class="sub">Voice notes → structured memories</div>
+    </div>
+  </header>
+
+  <section class="panel">
+    <h2>Recorder</h2>
+    <div id="deviceStatus" class="status"><span class="dot"></span>Checking ESP32…</div>
+    <div class="row">
+      <button id="startBtn" class="start" onclick="startRecording()">Start recording</button>
+      <button id="stopBtn" class="stop" onclick="stopRecording()" disabled>Stop recording</button>
+      <button id="retryBtn" class="secondary" onclick="retryUpload()" disabled>Retry upload</button>
+    </div>
+    <div id="message" class="hint">Connect the ESP32 to the same Wi-Fi network as this computer.</div>
+    <div class="notice">This first milestone records up to 20 seconds, temporarily stores the WAV on ESP32 flash, sends it to the Python server, and deletes the device copy after the server confirms successful processing. The PC database stores transcripts and structured text, not audio. Speaker playback and OLED status are the next milestone.</div>
+  </section>
+
+  <section class="panel">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Saved notes</h2>
+      <button class="secondary" onclick="loadNotes()">Refresh</button>
+    </div>
+    <div id="notes" class="notes" style="margin-top:14px"><div class="hint">Loading notes…</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Ask your memories</h2>
+    <textarea id="question" placeholder="Example: What did I say I need to finish this week?"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button id="askBtn" class="secondary" onclick="askQuestion()">Ask Pala Note</button>
+    </div>
+    <div id="answer" class="answer"></div>
+  </section>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let lastUploadPending = false;
+  let statusRequestActive = false;
+
+  async function api(url, options = {}) {
+    const response = await fetch(url, { ...options, headers: { ...(options.headers || {}) } });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || data.message || `HTTP ${response.status}`);
+    return data;
+  }
+
+  function showMessage(message, isError = false) {
+    $('message').textContent = message;
+    $('message').className = isError ? 'hint error' : 'hint';
+  }
+
+  async function startRecording() {
+    $('startBtn').disabled = true;
+    showMessage('Starting microphone…');
+    try {
+      await api('/api/device/start', { method: 'POST' });
+      showMessage('Recording. Speak clearly, then press Stop.');
+      await pollStatus();
+    } catch (err) {
+      showMessage(err.message, true);
+    } finally {
+      $('startBtn').disabled = false;
+    }
+  }
+
+  async function stopRecording() {
+    $('stopBtn').disabled = true;
+    showMessage('Stopping recording…');
+    try {
+      await api('/api/device/stop', { method: 'POST' });
+      showMessage('Recording stopped. Uploading to Python and processing with Gemini…');
+      await pollStatus();
+    } catch (err) {
+      showMessage(err.message, true);
+    }
+  }
+
+  async function retryUpload() {
+    $('retryBtn').disabled = true;
+    showMessage('Requesting upload retry…');
+    try {
+      await api('/api/device/retry-upload', { method: 'POST' });
+      showMessage('Upload retry queued.');
+    } catch (err) {
+      showMessage(err.message, true);
+    } finally {
+      setTimeout(pollStatus, 800);
+    }
+  }
+
+  async function pollStatus() {
+    if (statusRequestActive) return;
+    statusRequestActive = true;
+    try {
+      const s = await api('/api/device/status');
+      const dot = s.recording ? 'good' : 'good';
+      const duration = s.recording ? ` · ${(s.duration_ms / 1000).toFixed(1)}s` : '';
+      let label = s.recording ? 'Recording' : (s.processing_note ? 'Gemini processing' : (s.upload_pending ? 'Upload pending' : 'ESP32 connected'));
+      $('deviceStatus').innerHTML = `<span class="dot ${dot}"></span>${label}${duration} · ${s.ip || 'device online'}`;
+      $('startBtn').disabled = !!s.recording || !!s.upload_pending;
+      $('stopBtn').disabled = !s.recording;
+      $('retryBtn').disabled = !s.upload_pending || !!s.recording;
+      if (s.upload_pending && !lastUploadPending) showMessage('Recording is waiting to upload. Check that Flask is running and both devices are on the same Wi-Fi.');
+      if (!s.upload_pending && lastUploadPending) {
+        showMessage('Upload and AI processing completed.');
+        loadNotes();
+      }
+      lastUploadPending = !!s.upload_pending;
+    } catch (err) {
+      $('deviceStatus').innerHTML = `<span class="dot bad"></span>ESP32 not reachable: ${escapeHtml(err.message)}`;
+      $('startBtn').disabled = true;
+      $('stopBtn').disabled = true;
+      $('retryBtn').disabled = true;
+    } finally {
+      statusRequestActive = false;
+    }
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  }
+
+  async function loadNotes() {
+    try {
+      const data = await api('/api/items');
+      const container = $('notes');
+      container.innerHTML = '';
+      if (!data.items || data.items.length === 0) {
+        container.innerHTML = '<div class="hint">No notes yet. Record your first voice note above.</div>';
+        return;
+      }
+      for (const item of data.items) {
+        const card = document.createElement('article');
+        card.className = 'note';
+        const top = document.createElement('div');
+        top.className = 'note-top';
+        const type = document.createElement('span');
+        type.className = 'type';
+        type.textContent = item.type || 'memory';
+        const date = document.createElement('span');
+        date.className = 'date';
+        date.textContent = item.created_at ? new Date(item.created_at).toLocaleString() : '';
+        top.append(type, date);
+        const title = document.createElement('h3');
+        title.textContent = item.title || 'Untitled note';
+        const summary = document.createElement('p');
+        summary.textContent = item.summary || '';
+        card.append(top, title, summary);
+        if (item.due || item.start) {
+          const when = document.createElement('p');
+          when.textContent = item.due ? `Due: ${item.due}` : `When: ${item.start}`;
+          card.append(when);
+        }
+        if (item.transcript) {
+          const transcript = document.createElement('p');
+          transcript.className = 'transcript';
+          transcript.textContent = `Transcript: ${item.transcript}`;
+          card.append(transcript);
+        }
+        container.append(card);
+      }
+    } catch (err) {
+      $('notes').textContent = `Could not load notes: ${err.message}`;
+    }
+  }
+
+  async function askQuestion() {
+    const question = $('question').value.trim();
+    if (!question) return;
+    $('askBtn').disabled = true;
+    $('answer').style.display = 'block';
+    $('answer').textContent = 'Thinking…';
+    try {
+      const data = await api('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question })
+      });
+      $('answer').textContent = data.answer;
+    } catch (err) {
+      $('answer').textContent = err.message;
+      $('answer').classList.add('error');
+    } finally {
+      $('askBtn').disabled = false;
+    }
+  }
+
+  pollStatus();
+  loadNotes();
+  setInterval(pollStatus, 1500);
+  setInterval(loadNotes, 5000);
+</script>
+</body>
+</html>
