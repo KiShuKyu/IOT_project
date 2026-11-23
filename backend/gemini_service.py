@@ -400,3 +400,48 @@ Rules:
             raise ValueError('Gemini returned empty project summary')
 
         return text
+
+    def answer_project_question(self, project_name, project_content, question):
+        question = str(question or '').strip()
+        if not question:
+            raise ValueError('A project question is required')
+        if not project_content:
+            raise ValueError('Project source content is empty')
+
+        prompt = f"""
+    You are Pala Note, a personal project-memory assistant.
+
+    Answer the user's question about their existing project using the
+    provided project source code as your primary source.
+
+    PROJECT NAME:
+    {project_name}
+
+    PROJECT SOURCE:
+    {project_content[:30000]}
+
+    USER QUESTION:
+    {question}
+
+    RULES:
+    - Answer directly and conversationally.
+    - Use only information supported by the provided source.
+    - If the source does not contain the answer, clearly say you cannot determine it from the available project files.
+    - Do not invent libraries, databases, features, design decisions, or implementation details.
+    - Keep the answer concise and suitable for being spoken aloud.
+    """
+
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.3
+            )
+        )
+
+        answer = (response.text or "").strip()
+
+        if not answer:
+            raise ValueError("Gemini returned an empty project answer")
+
+        return answer

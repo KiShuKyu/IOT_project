@@ -1,7 +1,7 @@
-# Python local environment and secrets
+# # Python local environment and secrets
 pala_note_mvp/python/.venv/
 python/.venv/
-python/.env
+# python/.env
 python/__pycache__/
 python/data/
 *.py[cod]

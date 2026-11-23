@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request ,session
 from werkzeug.utils import secure_filename
 import mimetypes
 from config import Config
@@ -15,7 +15,20 @@ from flask import send_file
 from openhands_service import OpenHandsService, OpenHandsServiceError
 from pathlib import Path
 
-app=Flask(__name__)
+import os
+import re
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+app = Flask(__name__)
+
+app.secret_key = os.environ.get("FLASK_SECRET_KEY")
+
+if not app.secret_key:
+    raise RuntimeError(
+        "FLASK_SECRET_KEY is missing. Check your backend .env file."
+    )
 app.config['MAX_CONTENT_LENGTH']=Config.MAX_UPLOAD_MB*1024*1024
 supabase=SupabaseService(Config.SUPABASE_URL,Config.SUPABASE_KEY,Config.ITEMS_TABLE)
 
@@ -288,6 +301,10 @@ def summarize_existing_project(project_slug):
                 error='Project not found.'
             ), 404
 
+        # Manual recall also establishes the active project for follow-up questions.
+        session['active_project_slug'] = project['project_slug']
+        session['active_project_name'] = project['project_name']
+
         project_file = Path(project['project_path']) / 'index.html'
 
         if not project_file.is_file():
@@ -309,14 +326,22 @@ def summarize_existing_project(project_slug):
             source
         )
 
-        wav_bytes = generate_tts_audio(summary)
+        audio_value = None
+        audio_error = None
+        try:
+            wav_bytes = generate_tts_audio(summary)
+            audio_value = base64.b64encode(wav_bytes).decode('utf-8')
+        except Exception as tts_error:
+            app.logger.warning('Manual project recall summary TTS failed: %s', tts_error)
+            audio_error = 'Speech generation is temporarily unavailable. The text summary is still available.'
 
         return jsonify(
             ok=True,
             project_name=project['project_name'],
             project_slug=project['project_slug'],
             summary=summary,
-            audio=base64.b64encode(wav_bytes).decode('utf-8')
+            audio=audio_value,
+            audio_error=audio_error
         ), 200
 
     except Exception:
@@ -726,105 +751,356 @@ def audio_upload():
         app.logger.exception('Audio processing failed')
         return jsonify(error='Audio processing failed',detail=str(e)),502
 
+
+def _normalise_project_text(value):
+    """Normalize names/slugs so project matching does not need another model call."""
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _project_mentioned_in_transcript(transcript, projects):
+    normalized_transcript = f" {_normalise_project_text(transcript)} "
+    matches = []
+
+    for project in projects:
+        variants = [
+            _normalise_project_text(project.get('project_name')),
+            _normalise_project_text(project.get('project_slug')),
+        ]
+        for variant in set(variants):
+            if len(variant) >= 3 and f" {variant} " in normalized_transcript:
+                matches.append((len(variant), project))
+
+    if not matches:
+        return None
+
+    # Prefer the longest matched name (e.g. "To Do List App" over "App").
+    matches.sort(key=lambda item: item[0], reverse=True)
+    longest = matches[0][0]
+    best = {item[1].get('project_slug'): item[1] for item in matches if item[0] == longest}
+    return next(iter(best.values())) if len(best) == 1 else None
+
+
+def _read_project_source(project, max_chars=30000):
+    """Read a compact set of real project files, not just the landing page."""
+    root = Path(project['project_path'])
+    allowed_suffixes = {
+        '.html', '.css', '.js', '.mjs', '.ts', '.tsx', '.jsx',
+        '.py', '.java', '.c', '.cpp', '.h', '.hpp', '.json',
+        '.md', '.txt', '.sql', '.yaml', '.yml'
+    }
+    excluded_parts = {'node_modules', '.git', '.venv', 'venv', '__pycache__', 'dist', 'build'}
+
+    if not root.exists() or not root.is_dir():
+        raise FileNotFoundError('Project directory was not found.')
+
+    candidates = []
+    index_file = root / 'index.html'
+    if index_file.is_file():
+        candidates.append(index_file)
+
+    for path in sorted(root.rglob('*')):
+        if not path.is_file() or path == index_file or path.suffix.lower() not in allowed_suffixes:
+            continue
+        if any(part in excluded_parts for part in path.parts):
+            continue
+        candidates.append(path)
+        if len(candidates) >= 20:
+            break
+
+    if not candidates:
+        raise FileNotFoundError('No readable project source files were found.')
+
+    chunks = []
+    remaining = max_chars
+    for path in candidates:
+        if remaining <= 0:
+            break
+        try:
+            content = path.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        relative = path.relative_to(root).as_posix()
+        header = f"\n\n--- FILE: {relative} ---\n"
+        allowance = max(0, remaining - len(header))
+        if allowance <= 0:
+            break
+        piece = header + content[:allowance]
+        chunks.append(piece)
+        remaining -= len(piece)
+
+    return ''.join(chunks).strip()
+
+
+def _attach_optional_project_audio(result, answer):
+    """TTS failure should not discard a useful text answer (e.g. during Gemini 503s)."""
+    try:
+        wav_bytes = generate_tts_audio(answer)
+        result['audio'] = base64.b64encode(wav_bytes).decode('utf-8')
+    except Exception as audio_error:
+        app.logger.warning('Project answer created, but TTS failed: %s', audio_error)
+        result['audio_error'] = 'Speech generation is temporarily unavailable. The text answer is still available.'
+
+
+def _answer_for_active_project(project, question, gemini):
+    source_file = Path(project['project_path']) / 'index.html'
+
+    if not source_file.is_file():
+        raise FileNotFoundError(
+            f"Project source file not found: {source_file}"
+        )
+
+    source = source_file.read_text(
+        encoding='utf-8',
+        errors='replace'
+    )[:30000]
+
+    return gemini.answer_project_question(
+        project['project_name'],
+        source,
+        question
+    )
+
+
+@app.get('/api/project-context')
+def get_project_context():
+    """Return the active project stored in this browser's signed Flask session."""
+    slug = session.get('active_project_slug')
+    if not slug:
+        return jsonify(ok=True, active=False), 200
+
+    try:
+        project = OpenHandsService().get_project_by_slug(slug)
+        if not project:
+            session.pop('active_project_slug', None)
+            session.pop('active_project_name', None)
+            return jsonify(ok=True, active=False), 200
+
+        return jsonify(
+            ok=True,
+            active=True,
+            project_name=project.get('project_name'),
+            project_slug=project.get('project_slug')
+        ), 200
+    except Exception:
+        app.logger.exception('Could not load active project context')
+        return jsonify(ok=False, error='Could not load active project context.'), 500
+
+
+@app.post('/api/project-chat')
+def project_chat():
+    """Answer a typed follow-up about the active project."""
+    if not device_auth_ok():
+        return jsonify(error='Unauthorized'), 401
+
+    data = request.get_json(silent=True) or {}
+    question = str(data.get('question', '')).strip()
+    if not question:
+        return jsonify(ok=False, error='Enter a question first.'), 400
+
+    slug = session.get('active_project_slug')
+    if not slug:
+        return jsonify(
+            ok=False,
+            error='No active project. Recall a project first, then ask a follow-up question.'
+        ), 409
+
+    try:
+        service = OpenHandsService()
+        project = service.get_project_by_slug(slug)
+        if not project:
+            session.pop('active_project_slug', None)
+            session.pop('active_project_name', None)
+            return jsonify(ok=False, error='The active project no longer exists. Recall it again.'), 404
+
+        gemini = GeminiService(Config.GEMINI_API_KEY, Config.GEMINI_MODEL)
+        answer = _answer_for_active_project(project, question, gemini)
+
+        result = {
+            'ok': True,
+            'intent': 'project_question',
+            'context_used': True,
+            'project_found': True,
+            'project_name': project['project_name'],
+            'project_slug': project['project_slug'],
+            'question': question,
+            'answer': answer,
+            'summary': answer
+        }
+        _attach_optional_project_audio(result, answer)
+        return jsonify(result), 200
+
+    except Exception as e:
+        app.logger.exception('Project follow-up failed')
+        return jsonify(
+            ok=False,
+            error='Could not answer the project question.',
+            detail=str(e)
+        ), 502
+
+
+@app.post('/api/project-chat/reset')
+def reset_project_context():
+    session.pop('active_project_slug', None)
+    session.pop('active_project_name', None)
+    return jsonify(ok=True, context_cleared=True, message='Active project context cleared.'), 200
+
+
 @app.post('/api/voice-command')
 def voice_command():
     if not device_auth_ok():
         return jsonify(error='Unauthorized'), 401
 
     f = request.files.get('audio')
-
     if not f or not f.filename:
         return jsonify(error="Expected multipart file field 'audio'"), 400
 
     filename = secure_filename(f.filename)
-    uploaded_mime = (f.mimetype or "").split(";", 1)[0].strip().lower()
+    uploaded_mime = (f.mimetype or '').split(';', 1)[0].strip().lower()
     guessed_mime = mimetypes.guess_type(filename)[0]
-
     mime = (
-        uploaded_mime
-        if uploaded_mime.startswith("audio/")
-        else guessed_mime
-        if guessed_mime and guessed_mime.startswith("audio/")
-        else "audio/wav"
+        uploaded_mime if uploaded_mime.startswith('audio/')
+        else guessed_mime if guessed_mime and guessed_mime.startswith('audio/')
+        else 'audio/wav'
     )
-    print("MIME BEFORE READ:", mime)
-    print("FILENAME:", filename)
-    data = f.read()
-    print("Detected audio MIME:", mime)
-    print("Uploaded filename:", filename)
 
-    if not data:
+    audio_data = f.read()
+    if not audio_data:
         return jsonify(error='Empty audio file'), 400
 
     try:
         gemini = GeminiService(Config.GEMINI_API_KEY, Config.GEMINI_MODEL)
-
-        transcript = gemini.transcribe_audio(data, mime)
-        intent = gemini.detect_voice_intent(transcript)
+        transcript = gemini.transcribe_audio(audio_data, mime)
+        normalized = transcript.lower().strip()
 
         result = {
             'ok': True,
             'transcript': transcript,
-            'intent': intent
+            'intent': 'project_question'
         }
 
-        if intent == "recall_project":
-            service = OpenHandsService()
-            projects = service.list_projects()
+        reset_phrases = (
+            'forget the current project', 'forget current project',
+            'clear current project', 'reset current project',
+            'forget this project', 'clear project context',
+            'reset project context', 'stop talking about this project',
+            'clear active project'
+        )
+        if any(phrase in normalized for phrase in reset_phrases):
+            session.pop('active_project_slug', None)
+            session.pop('active_project_name', None)
+            result.update({
+                'context_cleared': True,
+                'project_found': False,
+                'message': 'Current project context cleared.'
+            })
+            return jsonify(result), 200
 
-            project_slug = gemini.identify_project(
-                transcript,
-                projects
-            )
+        service = OpenHandsService()
+        projects = service.list_projects()
+        active_slug = session.get('active_project_slug')
 
-            if not project_slug:
-                result["project_found"] = False
-                result["message"] = "I couldn't identify which project you mean."
-                return jsonify(result), 200
+        # First use exact local project-name matching. This avoids an extra Gemini
+        # identification request on every follow-up and supports fast project switches.
+        mentioned_project = _project_mentioned_in_transcript(transcript, projects)
+        if mentioned_project:
+            active_slug = mentioned_project.get('project_slug')
+            session['active_project_slug'] = active_slug
+            session['active_project_name'] = mentioned_project.get('project_name')
 
-            project = service.get_project_by_slug(project_slug)
+        project = service.get_project_by_slug(active_slug) if active_slug else None
 
-            if not project:
-                result["project_found"] = False
-                result["message"] = "The selected project could not be found."
-                return jsonify(result), 200
+        # When the user explicitly names a project, decide whether they want its
+        # overview or a specific answer using simple language cues.
+        overview_phrases = (
+            'tell me about', 'give me an overview', 'overview of',
+            'summarize', 'summary of', 'describe', 'recall my project',
+            'what does it do', 'what is this project', 'explain this project'
+        )
+        question_starters = (
+            'what ', 'how ', 'why ', 'where ', 'when ', 'who ', 'which ',
+            'can ', 'could ', 'does ', 'did ', 'is ', 'are ', 'was ', 'were '
+        )
+        looks_like_specific_question = normalized.startswith(question_starters) or normalized.endswith('?')
+        wants_overview = (
+            any(phrase in normalized for phrase in overview_phrases)
+            or (mentioned_project is not None and not looks_like_specific_question)
+        )
+
+        if project:
+            session['active_project_slug'] = project['project_slug']
+            session['active_project_name'] = project['project_name']
+
+            if mentioned_project and wants_overview:
+                source = _read_project_source(project)
+                answer = gemini.summarize_project_contents(project['project_name'], source)
+                result['intent'] = 'recall_project'
+                result['context_used'] = False
+            else:
+                # No project name in the follow-up? Reuse the active project.
+                # A specific question after recall is treated as a project question.
+                question = transcript
+                answer = _answer_for_active_project(project, question, gemini)
+                result['intent'] = 'project_question'
+                result['context_used'] = True
 
             result.update({
-                "project_found": True,
-                "project_name": project["project_name"],
-                "project_slug": project["project_slug"]
+                'project_found': True,
+                'project_name': project['project_name'],
+                'project_slug': project['project_slug'],
+                'answer': answer,
+                'summary': answer
             })
+            _attach_optional_project_audio(result, answer)
+            return jsonify(result), 200
 
-            source_file = Path(project['project_path']) / 'index.html'
+        # No active project was available. Use the classifier and existing project
+        # identifier only as a fallback for less exact first-time references.
+        intent = gemini.detect_voice_intent(transcript)
+        result['intent'] = intent
 
-            if source_file.is_file():
-                source = source_file.read_text(
-                    encoding='utf-8',
-                    errors='replace'
-                )[:30000]
-
-                summary = GeminiService(
-                    Config.GEMINI_API_KEY,
-                    Config.GEMINI_MODEL
-                ).summarize_project_contents(
-                    project['project_name'],
-                    source
-                )
-
-                wav_bytes = generate_tts_audio(summary)
-
+        if intent == 'recall_project':
+            identified_slug = gemini.identify_project(transcript, projects)
+            if not identified_slug:
                 result.update({
-                    "summary": summary,
-                    "audio": base64.b64encode(wav_bytes).decode('utf-8')
+                    'project_found': False,
+                    'message': "I couldn't identify the project. Try saying its exact name."
                 })
-            else:
-                result["summary"] = "I couldn't find the source files for this project."
+                return jsonify(result), 200
 
+            project = service.get_project_by_slug(identified_slug)
+            if not project:
+                result.update({
+                    'project_found': False,
+                    'message': 'The selected project could not be found.'
+                })
+                return jsonify(result), 200
+
+            session['active_project_slug'] = project['project_slug']
+            session['active_project_name'] = project['project_name']
+            source = _read_project_source(project)
+            answer = gemini.summarize_project_contents(project['project_name'], source)
+            result.update({
+                'intent': 'recall_project',
+                'project_found': True,
+                'project_name': project['project_name'],
+                'project_slug': project['project_slug'],
+                'answer': answer,
+                'summary': answer
+            })
+            _attach_optional_project_audio(result, answer)
+            return jsonify(result), 200
+
+        result.update({
+            'project_found': False,
+            'context_used': False,
+            'message': 'No active project. Name a project to start a project conversation.'
+        })
         return jsonify(result), 200
 
     except Exception as e:
         app.logger.exception('Voice command processing failed')
         return jsonify(
+            ok=False,
             error='Voice command processing failed',
             detail=str(e)
         ), 502

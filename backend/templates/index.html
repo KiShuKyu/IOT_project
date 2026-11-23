@@ -5,6 +5,18 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Pala Note</title>
     <link rel="stylesheet" href="/static/style.css">
+
+    <style>
+        .project-chat-log { display: flex; flex-direction: column; gap: 10px; max-height: 260px; overflow-y: auto; margin: 12px 0; }
+        .project-chat-message { border: 1px solid #34415c; border-radius: 10px; padding: 10px 12px; }
+        .project-chat-message.user { background: rgba(93, 131, 220, 0.12); }
+        .project-chat-message.assistant { background: rgba(255, 255, 255, 0.035); }
+        .project-chat-message p { margin: 6px 0 0; white-space: pre-wrap; }
+        .project-chat-input { display: flex; gap: 8px; align-items: center; }
+        .project-chat-input input { flex: 1; min-width: 0; }
+        #voiceRecallActiveProject { font-weight: 600; }
+        @media (max-width: 600px) { .project-chat-input { flex-direction: column; align-items: stretch; } }
+    </style>
 </head>
 <body>
 <main class="wrap">
@@ -76,6 +88,34 @@
         <div id="recallProjectSummary" class="result"></div>
 
         <audio id="recallProjectAudio" controls hidden></audio>
+    </section>
+
+    <section class="panel" id="voiceRecallPanel">
+        <h2>Project Conversation</h2>
+        <p>Recall a project, then ask follow-up questions by typing or speaking.</p>
+        <p id="voiceRecallActiveProject" class="result">No active project. Recall a project first.</p>
+
+        <div id="voiceRecallConversation" class="project-chat-log" aria-live="polite"></div>
+
+        <label for="voiceRecallQuestion">Ask a follow-up question</label>
+        <div class="project-chat-input">
+            <input type="text" id="voiceRecallQuestion" placeholder="e.g. What database did I use?">
+            <button type="button" id="voiceRecallAsk">Ask Pala</button>
+        </div>
+
+        <p>Or ask using your voice:</p>
+        <div>
+            <button type="button" id="voiceRecallStart">Record voice question</button>
+            <button type="button" id="voiceRecallStop" disabled>Stop recording</button>
+            <button type="button" class="secondary" id="voiceRecallClear">Clear active project</button>
+        </div>
+
+        <p id="voiceRecallStatus" aria-live="polite"></p>
+        <h3>Last transcript</h3>
+        <div id="voiceRecallTranscript" class="result"></div>
+        <h3>Latest answer</h3>
+        <div id="voiceRecallSummary" class="result"></div>
+        <audio id="voiceRecallAudio" controls hidden></audio>
     </section>
 
     <section class="panel">
